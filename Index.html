@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VTuber Web App</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            background-color: #121212;
+            color: white;
+        }
+        .container {
+            margin: 20px auto;
+            max-width: 800px;
+        }
+        video, canvas {
+            display: block;
+            margin: 10px auto;
+            border: 1px solid #fff;
+        }
+        button {
+            margin: 10px;
+            padding: 10px 20px;
+            background-color: #6200ea;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #3700b3;
+        }
+        input {
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>VTuber Face Tracking</h1>
+        <video id="video" width="640" height="480" autoplay></video>
+        <canvas id="canvas" width="640" height="480"></canvas>
+        <canvas id="vrmCanvas" width="640" height="480"></canvas>
+        <br>
+        <input type="file" id="vrmInput" accept=".vrm">
+        <button onclick="startTracking()">Start Tracking</button>
+        <button onclick="stopTracking()">Stop Tracking</button>
+        <p>FPS: <span id="fps">0</span></p>
+    </div>
+
+    <!-- Load external scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2.0.0/lib/three-vrm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+
+    <script>
+        let video = document.getElementById('video');
+        let canvas = document.getElementById('canvas');
+        let vrmCanvas = document.getElementById('vrmCanvas');
+        let ctx = canvas.getContext('2d');
+
+        let tracking = false;
+        let faceMesh;
+        let vrmModel;
+        let scene, camera, renderer;
+        
+        // Start Camera
+        async function startTracking() {
+            let stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            video.srcObject = stream;
+            tracking = true;
+            initFaceMesh();
+            initThreeJS();
+        }
+
+        // Stop Camera
+        function stopTracking() {
+            tracking = false;
+            let stream = video.srcObject;
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+            }
+        }
+
+        // Initialize MediaPipe Face Mesh
+        async function initFaceMesh() {
+            faceMesh = new FaceMesh({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+            });
+
+            faceMesh.setOptions({
+                maxNumFaces: 1,
+                refineLandmarks: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            faceMesh.onResults(handleFaceMeshResults);
+            trackFace();
+        }
+
+        // Handle FaceMesh Results
+        async function trackFace() {
+            if (!tracking) return;
+            await faceMesh.send({ image: video });
+            requestAnimationFrame(trackFace);
+        }
+
+        function handleFaceMeshResults(results) {
+            if (!results.multiFaceLandmarks.length) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            let landmarks = results.multiFaceLandmarks[0];
+            ctx.fillStyle = '#00FF00';
+            landmarks.forEach(point => {
+                ctx.beginPath();
+                ctx.arc(point.x * canvas.width, point.y * canvas.height, 2, 0, 2 * Math.PI);
+                ctx.fill();
+            });
+
+            updateVRMTracking(landmarks);
+        }
+
+        // Initialize Three.js Scene
+        function initThreeJS() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(30, vrmCanvas.width / vrmCanvas.height, 0.1, 20);
+            camera.position.set(0, 1.4, 1.4);
+            camera.lookAt(0, 1.4, 0);
+
+            renderer = new THREE.WebGLRenderer({ canvas: vrmCanvas, alpha: true });
+            renderer.setSize(640, 480);
+            renderer.setPixelRatio(window.devicePixelRatio);
+
+            let light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(1, 1, 1).normalize();
+            scene.add(light);
+
+            let ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+
+            animate();
+        }
+
+        // Load VRM Model
+        document.getElementById('vrmInput').addEventListener('change', function (event) {
+            let file = event.target.files[0];
+            if (file) {
+                loadVRM(URL.createObjectURL(file));
+            }
+        });
+
+        async function loadVRM(url) {
+            let loader = new THREE.VRMLoader();
+            loader.load(url, (vrm) => {
+                if (vrmModel) {
+                    scene.remove(vrmModel.scene);
+                }
+                vrmModel = vrm;
+                scene.add(vrm.scene);
+            });
+        }
+
+        // Update VRM based on tracking data
+        function updateVRMTracking(landmarks) {
+            if (!vrmModel) return;
+
+            let head = landmarks[10]; // Approximate nose position
+            let leftEye = landmarks[33];
+            let rightEye = landmarks[263];
+
+            let yaw = Math.atan2(leftEye.x - rightEye.x, leftEye.z - rightEye.z) * (180 / Math.PI);
+            let pitch = Math.atan2(head.y - (leftEye.y + rightEye.y) / 2, head.z - (leftEye.z + rightEye.z) / 2) * (180 / Math.PI);
+            let roll = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x) * (180 / Math.PI);
+
+            if (vrmModel.humanoid) {
+                let neck = vrmModel.humanoid.getNormalizedBoneNode('neck');
+                if (neck) {
+                    neck.rotation.y = THREE.MathUtils.degToRad(yaw);
+                    neck.rotation.x = THREE.MathUtils.degToRad(pitch);
+                    neck.rotation.z = THREE.MathUtils.degToRad(roll);
+                }
+            }
+        }
+
+        // Animate Scene
+        function animate() {
+            requestAnimationFrame(animate);
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
